@@ -103,57 +103,46 @@ st.title("📊 Final Project Financial Dashboard")
 
 
 # =====================================================================
-# PART 1 — INDIVIDUAL STOCK ANALYSIS (FULLY FIXED)
+# PART 1 — INDIVIDUAL STOCK ANALYSIS
 # =====================================================================
 st.header("Part 1: Individual Stock Analysis")
 
 raw = yf.download(stock, period="6mo", interval="1d", progress=False)
 
-# Handle failures and rate-limit returns
 if raw is None or raw.empty:
     st.error(
         f"❌ Unable to retrieve stock data for **{stock}**.\n"
-        "This usually happens due to Yahoo Finance rate limiting.\n"
-        "Please try again in 30–60 seconds."
+        "Yahoo Finance may be rate-limiting your request. Please try again shortly."
     )
 else:
-    # --------------------------------------------------------
-    # FIX: Normalize MultiIndex → always extract a single Close series
-    # --------------------------------------------------------
+    # Handle MultiIndex: ("Close", "AAPL")
     if isinstance(raw.columns, pd.MultiIndex):
-        # Example: ("Close", "AAPL")
         close_candidates = [col for col in raw.columns if col[0] == "Close"]
         if close_candidates:
             close_series = raw[close_candidates[0]]
         else:
-            st.error("❌ No 'Close' price found in downloaded data.")
+            st.error("❌ No usable 'Close' price found.")
             st.stop()
     else:
         if "Close" not in raw.columns:
-            st.error("❌ 'Close' column missing from data.")
+            st.error("❌ No 'Close' column in the downloaded data.")
             st.stop()
         close_series = raw["Close"]
 
-    # Normalize type
     close_series = close_series.astype(float)
 
     data = pd.DataFrame({"Close": close_series})
     data["20MA"] = data["Close"].rolling(20).mean()
     data["50MA"] = data["Close"].rolling(50).mean()
 
-    # Ensure we have enough rows
     if len(data) < 60:
-        st.error("⚠ Not enough data to compute indicators (need at least 60 days).")
+        st.error("⚠ Not enough data (need at least 60 days).")
         st.stop()
 
-    # Extract scalar safely
     price = float(data["Close"].iloc[-1])
     ma20 = float(data["20MA"].iloc[-1]) if not pd.isna(data["20MA"].iloc[-1]) else None
     ma50 = float(data["50MA"].iloc[-1]) if not pd.isna(data["50MA"].iloc[-1]) else None
 
-    # --------------------------
-    # Trend Logic (safe)
-    # --------------------------
     if ma20 is None or ma50 is None:
         trend = "Mixed Trend"
     else:
@@ -164,9 +153,6 @@ else:
         else:
             trend = "Mixed Trend"
 
-    # --------------------------
-    # RSI
-    # --------------------------
     delta = data["Close"].diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
@@ -174,7 +160,6 @@ else:
     avg_loss = loss.rolling(14).mean()
     rs = avg_gain / avg_loss
     data["RSI"] = 100 - (100 / (1 + rs))
-
     rsi_val = float(data["RSI"].iloc[-1]) if not pd.isna(data["RSI"].iloc[-1]) else None
 
     if rsi_val is None:
@@ -186,12 +171,9 @@ else:
     else:
         rsi_sig = "Neutral"
 
-    # --------------------------
-    # Volatility
-    # --------------------------
     data["Return"] = data["Close"].pct_change()
-    vol_series = data["Return"].rolling(20).std() * np.sqrt(252)
-    vol_val = float(vol_series.iloc[-1]) if not pd.isna(vol_series.iloc[-1]) else None
+    vol_vals = data["Return"].rolling(20).std() * np.sqrt(252)
+    vol_val = float(vol_vals.iloc[-1]) if not pd.isna(vol_vals.iloc[-1]) else None
 
     if vol_val is None:
         vol_class = "Medium"
@@ -202,15 +184,11 @@ else:
     else:
         vol_class = "Low"
 
-    # --------------------------
-    # DISPLAY
-    # --------------------------
     st.subheader(f"Results for {stock}")
     st.write(f"**Trend:** {trend_emoji(trend)}")
     st.write(f"**RSI:** {rsi_emoji(rsi_sig)} — {rsi_val:.2f}" if rsi_val else "RSI unavailable")
     st.write(f"**Volatility:** {vol_emoji(vol_class)} — {vol_val:.2%}" if vol_val else "Volatility unavailable")
 
-    # Chart
     st.markdown('<div class="chart-box-green">', unsafe_allow_html=True)
     fig, ax = plt.subplots(figsize=(10, 4))
     ax.plot(data["Close"], label="Close", color="white")
@@ -233,122 +211,70 @@ else:
 
     if prices is None or prices.empty:
         st.error("❌ Unable to load portfolio data. Try again later.")
-    else:
-        # -----------------------------------------------------
-        # Handle MultiIndex columns safely ("Adj Close", etc.)
-        # -----------------------------------------------------
-        if isinstance(prices.columns, pd.MultiIndex):
-            if ("Adj Close", portfolio[0]) in prices.columns:
-                prices_used = prices["Adj Close"]
-            elif ("Close", portfolio[0]) in prices.columns:
-                prices_used = prices["Close"]
-            else:
-                st.error("❌ No usable ('Adj Close' or 'Close') price data returned.")
-                st.stop()
-        else:
-            if "Adj Close" in prices.columns:
-                prices_used = prices["Adj Close"]
-            elif "Close" in prices.columns:
-                prices_used = prices["Close"]
-            else:
-                st.error("❌ No usable price columns found.")
-                st.stop()
-
-        # -----------------------------------------------------
-        # Benchmark (SPY)
-        # -----------------------------------------------------
-        bench = safe_download("SPY", period="1y")
-        if bench is None:
-            st.error("❌ Failed to load SPY benchmark.")
-            st.stop()
-
-        if "Adj Close" in bench.columns:
-            bench_used = bench["Adj Close"]
-        elif "Close" in bench.columns:
-            bench_used = bench["Close"]
-        else:
-            st.error("❌ SPY missing price data.")
-            st.stop()
-
-        # -----------------------------------------------------
-        # Returns
-        # -----------------------------------------------------
-        returns = prices_used.pct_change().dropna()
-        weights = np.array([1/5] * 5)
-
-        # Force portfolio_returns clean
-        portfolio_returns = (returns * weights).sum(axis=1).astype(float)
-
-        # Benchmark returns (safe handling)
-        raw_bench_returns = bench_used.pct_change().dropna()
-
-        if isinstance(raw_bench_returns, pd.DataFrame):
-            benchmark_returns = raw_bench_returns.iloc[:, 0]
-        else:
-            benchmark_returns = raw_bench_returns
-
-        benchmark_returns = benchmark_returns.astype(float)
-
-        # Final metrics (always floats)
-        total_return = float((1 + portfolio_returns).prod() - 1)
-        bench_return = float((1 + benchmark_returns).prod() - 1)
-        outperf = float(total_return - bench_return)
-        vol = float(portfolio_returns.std() * np.sqrt(252))
-        sharpe = float((portfolio_returns.mean() * 252) / (portfolio_returns.std() * np.sqrt(252)))
-
-        # -----------------------------------------------------
-        # Display portfolio metrics
-        # -----------------------------------------------------
-        st.subheader("Portfolio Metrics")
-        st.write(f"**Total Return:** 🟦 {total_return:.2%}")
-        st.write(f"**SPY Return:** 🟧 {bench_return:.2%}")
-        st.write(f"**Outperformance:** {'🟢+' if outperf>0 else '🔴'} {outperf:.2%}")
-        st.write(f"**Volatility:** {vol_emoji('High' if vol>0.40 else 'Medium' if vol>=0.25 else 'Low')} — {vol:.2%}")
-        st.write(f"**Sharpe Ratio:** ⭐ {sharpe:.2f}")
-
-        # Chart
-        st.markdown('<div class="chart-box-yellow">', unsafe_allow_html=True)
-        cumulative = pd.DataFrame({
-            "Portfolio": (1 + portfolio_returns).cumprod(),
-            "SPY": (1 + benchmark_returns).cumprod()
-        })
-        st.line_chart(cumulative)
-        st.markdown("</div>", unsafe_allow_html=True)
-data = safe_download(stock)
-
-if data is None:
-    st.error("❌ Unable to retrieve stock data. Try another ticker.")
-else:
-
-    # --------------------------------------------------------
-    # FIX: Normalize MultiIndex → always extract single column
-    # --------------------------------------------------------
-    if isinstance(data.columns, pd.MultiIndex):
-        # yfinance sometimes returns multiindex: ("Close", "AAPL")
-        if ("Close", stock) in data.columns:
-            close_series = data[("Close", stock)]
-        else:
-            st.error("❌ No valid 'Close' column found for this ticker.")
-            st.stop()
-    else:
-        if "Close" in data.columns:
-            close_series = data["Close"]
-        else:
-            st.error("❌ No 'Close' column in downloaded data.")
-            st.stop()
-
-    data["Close_fixed"] = close_series.astype(float)
-
-    # Use normalized close prices
-    data["20MA"] = data["Close_fixed"].rolling(20).mean()
-    data["50MA"] = data["Close_fixed"].rolling(50).mean()
-
-    # SAFE extraction of scalar price
-    try:
-        price = float(data["Close_fixed"].iloc[-1])
-    except:
-        st.error("❌ Could not extract latest price. Data may be incomplete.")
         st.stop()
 
-    ma20 = float(data["20MA"].iloc[-1]) if not pd.isna(data["20MA"].iloc[-1]) else None
-    ma50 = float(data["50MA"].iloc[-1]) if not pd.isna(data["50MA"].iloc[-1]) else None
+    # Handle MultiIndex price columns
+    if isinstance(prices.columns, pd.MultiIndex):
+        if ("Adj Close", portfolio[0]) in prices.columns:
+            prices_used = prices["Adj Close"]
+        elif ("Close", portfolio[0]) in prices.columns:
+            prices_used = prices["Close"]
+        else:
+            st.error("❌ Missing price columns in portfolio data.")
+            st.stop()
+    else:
+        if "Adj Close" in prices.columns:
+            prices_used = prices["Adj Close"]
+        elif "Close" in prices.columns:
+            prices_used = prices["Close"]
+        else:
+            st.error("❌ No valid price columns found.")
+            st.stop()
+
+    bench = safe_download("SPY", period="1y")
+    if bench is None:
+        st.error("❌ SPY benchmark failed to load.")
+        st.stop()
+
+    if "Adj Close" in bench.columns:
+        bench_used = bench["Adj Close"]
+    elif "Close" in bench.columns:
+        bench_used = bench["Close"]
+    else:
+        st.error("❌ SPY missing price columns.")
+        st.stop()
+
+    returns = prices_used.pct_change().dropna()
+    weights = np.array([1/5] * 5)
+
+    portfolio_returns = (returns * weights).sum(axis=1).astype(float)
+
+    raw_bench_returns = bench_used.pct_change().dropna()
+    if isinstance(raw_bench_returns, pd.DataFrame):
+        benchmark_returns = raw_bench_returns.iloc[:, 0]
+    else:
+        benchmark_returns = raw_bench_returns
+
+    benchmark_returns = benchmark_returns.astype(float)
+
+    total_return = float((1 + portfolio_returns).prod() - 1)
+    bench_return = float((1 + benchmark_returns).prod() - 1)
+    outperf = float(total_return - bench_return)
+    vol = float(portfolio_returns.std() * np.sqrt(252))
+    sharpe = float((portfolio_returns.mean() * 252) /
+                   (portfolio_returns.std() * np.sqrt(252)))
+
+    st.subheader("Portfolio Metrics")
+    st.write(f"**Total Return:** 🟦 {total_return:.2%}")
+    st.write(f"**SPY Return:** 🟧 {bench_return:.2%}")
+    st.write(f"**Outperformance:** {'🟢+' if outperf > 0 else '🔴'} {outperf:.2%}")
+    st.write(f"**Volatility:** {vol_emoji('High' if vol > 0.40 else 'Medium' if vol >= 0.25 else 'Low')} — {vol:.2%}")
+    st.write(f"**Sharpe Ratio:** ⭐ {sharpe:.2f}")
+
+    st.markdown('<div class="chart-box-yellow">', unsafe_allow_html=True)
+    cumulative = pd.DataFrame({
+        "Portfolio": (1 + portfolio_returns).cumprod(),
+        "SPY": (1 + benchmark_returns).cumprod()
+    })
+    st.line_chart(cumulative)
+    st.markdown("</div>", unsafe_allow_html=True)
